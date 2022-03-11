@@ -2,6 +2,7 @@ import enum
 import importlib
 import json
 import logging
+import os
 import textwrap
 import traceback
 from typing import Iterable
@@ -11,6 +12,7 @@ from pygls.lsp.methods import CODE_ACTION
 from pygls.lsp.methods import COMPLETION
 from pygls.lsp.methods import COMPLETION_ITEM_RESOLVE
 from pygls.lsp.methods import DEFINITION
+from pygls.lsp.methods import DOCUMENT_LINK_RESOLVE
 from pygls.lsp.methods import DOCUMENT_SYMBOL
 from pygls.lsp.methods import INITIALIZE
 from pygls.lsp.methods import INITIALIZED
@@ -28,6 +30,7 @@ from pygls.lsp.types import DeleteFilesParams
 from pygls.lsp.types import DidChangeTextDocumentParams
 from pygls.lsp.types import DidOpenTextDocumentParams
 from pygls.lsp.types import DidSaveTextDocumentParams
+from pygls.lsp.types import DocumentLinkResolveParams
 from pygls.lsp.types import DocumentSymbolParams
 from pygls.lsp.types import FileOperationFilter
 from pygls.lsp.types import FileOperationPattern
@@ -239,6 +242,17 @@ def _configure_lsp_methods(server: RstLanguageServer) -> RstLanguageServer:
                         definitions += feature.definition(context)
 
         return definitions
+
+    @server.feature(DOCUMENT_LINK_RESOLVE)
+    def on_document_link_resolve(ls: RstLanguageServer, params: DocumentLinkResolveParams):
+        uri = params.text_document.uri
+        pos = params.position
+
+        doc = ls.workspace.get_document(uri)
+        line = ls.line_at_position(doc, pos)
+        location = ls.get_location_type(doc, pos)
+
+        return str(os.path.join(ls.workspace.root_path, uri))
 
     @server.feature(DOCUMENT_SYMBOL)
     def on_document_symbol(ls: RstLanguageServer, params: DocumentSymbolParams):
