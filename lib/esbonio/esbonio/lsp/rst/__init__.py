@@ -104,6 +104,13 @@ class DefinitionContext:
             f"DefinitionContext<{self.doc.uri}:{p} ({self.location}) -- {self.match}>"
         )
 
+class DocumentLinkContext:
+    type: str
+    fileName: str
+
+    def __init__(self, data: dict) -> None:
+        for k, _ in typing.get_type_hints(self).items():
+            setattr(self, k, data[k])
 
 class LanguageFeature:
     """Base class for language features."""

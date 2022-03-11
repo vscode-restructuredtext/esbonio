@@ -3,9 +3,11 @@ import importlib
 import json
 import logging
 import os
+from pathlib import Path, PurePath, PurePosixPath
+import re
 import textwrap
 import traceback
-from typing import Iterable
+from typing import Iterable, List, Tuple
 from typing import Type
 
 from pygls.lsp.methods import CODE_ACTION
@@ -30,7 +32,7 @@ from pygls.lsp.types import DeleteFilesParams
 from pygls.lsp.types import DidChangeTextDocumentParams
 from pygls.lsp.types import DidOpenTextDocumentParams
 from pygls.lsp.types import DidSaveTextDocumentParams
-from pygls.lsp.types import DocumentLinkResolveParams
+from pygls.lsp.types import DocumentLink
 from pygls.lsp.types import DocumentSymbolParams
 from pygls.lsp.types import FileOperationFilter
 from pygls.lsp.types import FileOperationPattern
@@ -40,7 +42,7 @@ from pygls.lsp.types import InitializeParams
 from pygls.lsp.types import ServerCapabilities
 from pygls.protocol import LanguageServerProtocol
 
-from .rst import CompletionContext
+from .rst import CompletionContext, DocumentLinkContext
 from .rst import DefinitionContext
 from .rst import LanguageFeature
 from .rst import RstLanguageServer
@@ -244,15 +246,32 @@ def _configure_lsp_methods(server: RstLanguageServer) -> RstLanguageServer:
         return definitions
 
     @server.feature(DOCUMENT_LINK_RESOLVE)
-    def on_document_link_resolve(ls: RstLanguageServer, params: DocumentLinkResolveParams):
-        uri = params.text_document.uri
-        pos = params.position
-
-        doc = ls.workspace.get_document(uri)
-        line = ls.line_at_position(doc, pos)
-        location = ls.get_location_type(doc, pos)
-
-        return str(os.path.join(ls.workspace.root_path, uri))
+    def on_document_link_resolve(ls: RstLanguageServer, params: DocumentLink):
+        fileName = params.target
+        data = DocumentLinkContext(params.data)
+        docPath = data.fileName
+        resolveType = data.type
+        if resolveType == "doc":
+            resolved_target_path = add_doc_target_ext(
+                fileName, PurePath(docPath), Path(ls.workspace.root_path)
+            )
+            if os.path.exists(resolved_target_path):
+                ls.logger.error("found doc")
+                return str(resolved_target_path)
+            ls.logger.error("resolved path does not exist: '%s'", resolved_target_path)
+            return None
+        elif resolveType == "directive":
+            resolved_target_path = add_directive_target(
+                fileName, PurePath(docPath), Path(ls.workspace.root_path)
+            )
+            if os.path.exists(resolved_target_path):
+                ls.logger.error("found directive")
+                return str(resolved_target_path)
+            ls.logger.error("resolved path does not exist: '%s'", resolved_target_path)
+            return None
+        else:
+            ls.logger.error("resolveType is not supported: '%s'", resolveType)
+            return None
 
     @server.feature(DOCUMENT_SYMBOL)
     def on_document_symbol(ls: RstLanguageServer, params: DocumentSymbolParams):
@@ -328,3 +347,83 @@ def dump(obj) -> str:
         return fields
 
     return json.dumps(obj, default=default)
+
+class FileId(PurePosixPath):
+    """An unambiguous file path relative to the local project's root."""
+
+    PAT_FILE_EXTENSIONS = re.compile(r"\.((txt)|(rst)|(yaml))$")
+
+    def collapse_dots(self) -> "FileId":
+        result: List[str] = []
+        for part in self.parts:
+            if part == "..":
+                result.pop()
+            elif part == ".":
+                continue
+            else:
+                result.append(part)
+        return FileId(*result)
+
+    @property
+    def without_known_suffix(self) -> str:
+        """Returns the fileid without any of its known file extensions (txt, rst, yaml)"""
+        fileid = self.with_name(self.PAT_FILE_EXTENSIONS.sub("", self.name))
+        return fileid.as_posix()
+
+    def as_dirhtml(self) -> str:
+        """Return a path string usable for referring to this page under the dirhtml static
+        site convention."""
+
+        # The project root is special
+        if self == FileId("index.txt"):
+            return ""
+
+        return self.without_known_suffix + "/"
+
+def reroot_path(
+    filename: PurePosixPath, docpath: PurePath, project_root: Path
+) -> Tuple[FileId, Path]:
+    """Files within a project may refer to other files. Return a canonical path
+    relative to the project root."""
+    if filename.is_absolute():
+        rel_fn = FileId(*filename.parts[1:])
+    else:
+        rel_fn = FileId(*docpath.parent.joinpath(filename).parts).collapse_dots()
+    try:
+        return rel_fn, project_root.joinpath(rel_fn).resolve()
+    except ValueError:
+        return rel_fn, Path(filename)
+
+RST_EXTENSIONS = {".rst"}
+
+def add_doc_target_ext(target: str, docpath: PurePath, project_root: Path) -> Path:
+    """Given the target file of a doc role, add the appropriate extension and return full file path"""
+    # Add .txt or .rst to end of doc role target path
+    target_path = PurePosixPath(target)
+    if target.endswith("/"):
+        # return directly if target is a folder.
+        fileid, resolved_target_path = reroot_path(target_path, docpath, project_root)
+        return resolved_target_path
+    # File already exists, like images
+    fileid, resolved_target_path = reroot_path(target_path, docpath, project_root)
+    if os.path.exists(resolved_target_path):
+        return resolved_target_path
+    # Adding the current suffix first takes into account dotted targets
+    for ext in RST_EXTENSIONS:
+        new_suffix = target_path.suffix + ext
+        temp_path = target_path.with_suffix(new_suffix)
+
+        fileid, resolved_target_path_suffix = reroot_path(
+            temp_path, docpath, project_root
+        )
+        if os.path.exists(resolved_target_path_suffix):
+            return resolved_target_path_suffix
+    # If none of the files exists, return the original file path to trigger errors.
+    return resolved_target_path
+
+def add_directive_target(target: str, docpath: PurePath, project_root: Path) -> Path:
+    """Given the target file of a directive and return full file path"""
+
+    target_path = PurePosixPath(target)
+    fileid, resolved_target_path = reroot_path(target_path, docpath, project_root)
+    return resolved_target_path
